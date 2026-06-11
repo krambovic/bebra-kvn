@@ -719,11 +719,7 @@ class AppBridge(QObject):
         if getattr(self, "_app_update_checker", None) is not None:
             return
         self.appUpdateState.emit({"phase": "checking"})
-        try:
-            channel = self.controller.state.settings.release_channel or "nightly"
-        except Exception:
-            channel = "nightly"
-        checker = UpdateChecker(self, channel=channel, prefer_qml=True)
+        checker = UpdateChecker(self)
         self._app_update_checker = checker
         checker.result.connect(self._on_app_update_result)
         checker.error.connect(self._on_app_update_error)
@@ -771,8 +767,13 @@ class AppBridge(QObject):
                     proxy_url = f"http://{PROXY_HOST}:{port}"
         except Exception:
             proxy_url = None
+        # Servers + settings to migrate into Lumen KVN
+        try:
+            migration_state = self.controller.state.to_dict()
+        except Exception:
+            migration_state = None
         self.appUpdateState.emit({"phase": "downloading", "percent": 0})
-        downloader = UpdateDownloader(update, proxy_url=proxy_url, restart_in_tray=False, parent=self)
+        downloader = UpdateDownloader(update, proxy_url=proxy_url, restart_in_tray=False, parent=self, migration_state=migration_state)
         self._app_update_downloader = downloader
         downloader.progress.connect(self._on_app_download_progress)
         downloader.status.connect(self._on_app_download_status)
@@ -791,7 +792,7 @@ class AppBridge(QObject):
         self.appUpdateState.emit({"phase": "downloading", "message": message})
 
     def _on_app_download_ok(self) -> None:
-        self.appUpdateState.emit({"phase": "ready", "message": "Обновление загружено. Перезапуск..."})
+        self.appUpdateState.emit({"phase": "ready", "message": "Серверы перенесены. BebraVPN закроется и установит Lumen KVN..."})
 
     def _on_app_download_error(self, message: str) -> None:
         self.appUpdateState.emit({"phase": "error", "message": message})

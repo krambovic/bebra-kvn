@@ -26,9 +26,26 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from .constants import APP_VERSION, BASE_DIR
 
-GITHUB_REPO = "krambovic/bebra-kvn"
+GITHUB_REPO = "krambovic/Lumen-KVN"
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 USER_AGENT = f"BebraVPN/{APP_VERSION}"
+
+LUMEN_APP_NAME = "Lumen KVN"
+
+
+def _find_self_uninstaller() -> Path | None:
+    """Locate the Inno Setup uninstaller for the current bebra-kvn install."""
+    try:
+        candidates = sorted(BASE_DIR.glob("unins*.exe"))
+    except Exception:
+        candidates = []
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return candidate
+        except Exception:
+            continue
+    return None
 
 
 def _powershell_literal(value: str) -> str:
@@ -139,30 +156,26 @@ def _fetch_text(url: str) -> str:
         return response.read().decode("utf-8", errors="replace")
 
 
-def _is_nightly_asset(asset: dict) -> bool:
+def _is_setup_asset(asset: dict) -> bool:
     name = str(asset.get("name") or "").lower()
-    return "nightly" in name or "qml" in name
+    if not name.endswith(".exe"):
+        return False
+    return ("setup" in name) or ("install" in name)
 
 
-def _asset_score(asset: dict, prefer_qml: bool = False) -> tuple[int, str]:
+def _asset_score(asset: dict) -> tuple[int, str]:
     name = str(asset.get("name") or "").lower()
-    if not name.endswith(".zip"):
+    if not _is_setup_asset(asset):
         return (0, name)
     score = 1
-    if "bebravpn" in name:
-        score += 2
-    if "windows" in name:
+    if "lumen" in name:
+        score += 3
+    if "windows" in name or "win" in name:
         score += 2
     if "x64" in name or "win64" in name or "amd64" in name:
         score += 2
-    if "portable" in name:
+    if "setup" in name:
         score += 1
-
-    is_nightly = _is_nightly_asset(asset)
-    if prefer_qml:
-        score += 5 if is_nightly else 0
-    else:
-        score += 0 if is_nightly else 5
     return (score, name)
 
 
@@ -172,10 +185,8 @@ class UpdateChecker(QThread):
     result = pyqtSignal(object)  # AppUpdate | None
     error = pyqtSignal(str)
 
-    def __init__(self, parent=None, channel: str = "stable", prefer_qml: bool = False):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self._channel = (channel or "stable").strip().lower()
-        self._prefer_qml = bool(prefer_qml) or self._channel == "nightly"
 
     def run(self) -> None:
         try:
@@ -185,28 +196,19 @@ class UpdateChecker(QThread):
 
             tag = data.get("tag_name", "")
 
-            if not _is_newer_version(tag, APP_VERSION):
-                self.result.emit(None)
-                return
-
-            zip_assets = [
+            setup_assets = [
                 a for a in data.get("assets", [])
-                if str(a.get("name") or "").lower().endswith(".zip")
-            ]
-            channel_assets = [
-                a for a in zip_assets
-                if _is_nightly_asset(a) == self._prefer_qml
+                if _is_setup_asset(a)
             ]
             asset = max(
-                channel_assets,
-                key=lambda a: _asset_score(a, self._prefer_qml),
+                setup_assets,
+                key=_asset_score,
                 default=None,
             )
 
             if not asset:
-                channel_name = "nightly" if self._prefer_qml else "stable"
                 self.error.emit(
-                    f"Релиз {tag} найден, но отсутствует zip-архив для канала {channel_name}"
+                    f"Релиз Lumen KVN {tag} найден, но в нём нет setup-установщика"
                 )
                 return
 
@@ -229,9 +231,6 @@ class UpdateChecker(QThread):
                     digest = _extract_digest(
                         _fetch_text(str(sidecar.get("browser_download_url") or ""))
                     )
-            if not digest:
-                self.error.emit(f"Релиз {tag} найден, но архив не содержит SHA-256")
-                return
 
             self.result.emit(AppUpdate(
                 version=tag.lstrip("v"),
@@ -267,11 +266,14 @@ class UpdateDownloader(QThread):
         proxy_url: str | None = None,
         restart_in_tray: bool = False,
         parent=None,
+        migration_state: dict | None = None,
     ):
         super().__init__(parent)
         self._update = update
         self._proxy_url = proxy_url
         self._restart_in_tray = restart_in_tray
+        # Full local AppState (servers + settings) to migrate into Lumen KVN.
+        self._migration_state = migration_state
 
     # ── download helpers ────────────────────────────────────────
 
@@ -419,8 +421,11 @@ class UpdateDownloader(QThread):
     def run(self) -> None:
         tmp_dir: Path | None = None
         try:
-            tmp_dir = Path(tempfile.mkdtemp(prefix="bebravpn_update_"))
-            zip_path = tmp_dir / "update.zip"
+            tmp_dir = Path(tempfile.mkdtemp(prefix="lumen_migrate_"))
+            setup_name = self._update.download_url.rsplit("/", 1)[-1] or "LumenKVN-Setup.exe"
+            if not setup_name.lower().endswith(".exe"):
+                setup_name += ".exe"
+            zip_path = tmp_dir / setup_name
 
             downloaded_ok = False
 
@@ -464,109 +469,86 @@ class UpdateDownloader(QThread):
                 shutil.rmtree(tmp_dir, ignore_errors=True)
                 return
 
-            self.status.emit("Проверка архива...")
+            # Integrity check is optional for the Lumen KVN installer: verify
+            # only when the release exposes a digest (asset digest or sidecar).
             expected_hash = _extract_digest(self._update.digest_sha256)
-            if not expected_hash:
-                self.error.emit("У релизного архива отсутствует SHA-256")
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-                return
-
-            real_hash = _sha256_file(zip_path)
-            if real_hash.lower() != expected_hash.lower():
-                self.error.emit("Контрольная сумма архива не совпадает")
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-                return
+            if expected_hash:
+                self.status.emit("Проверка установщика...")
+                real_hash = _sha256_file(zip_path)
+                if real_hash.lower() != expected_hash.lower():
+                    self.error.emit("Контрольная сумма установщика не совпадает")
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                    return
 
             self.progress.emit(100)
-            self.status.emit("Распаковка...")
 
-            # Extract
-            extract_dir = tmp_dir / "extracted"
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                safe_extract_zip(zf, extract_dir)
+            self.status.emit("Подготовка переноса серверов...")
+            config_file = ""
+            try:
+                # ensure_ascii + utf-8 (no BOM) so the file starts with '{'.
+                state_path = tmp_dir / "lumen-servers.json"
+                state_path.write_text(
+                    json.dumps(self._migration_state or {}, ensure_ascii=True, indent=2),
+                    encoding="utf-8",
+                )
+                config_file = str(state_path)
+            except Exception as exc:
+                _log.warning("Server config export failed: %s", exc)
+                config_file = ""
 
-            exe_name = "BebraVPN.exe"
-            source_dir = _resolve_extracted_app_dir(extract_dir, exe_name)
-            if not (source_dir / exe_name).is_file():
-                self.error.emit("Архив обновления не содержит BebraVPN.exe")
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-                return
-
-            # Write restart script
+            self.status.emit("Установка Lumen KVN...")
             current_pid = os.getpid()
-            app_dir = BASE_DIR
-            script = tmp_dir / "_update.ps1"
+            uninstaller = _find_self_uninstaller()
+            script = tmp_dir / "_migrate.ps1"
             script_text = "\r\n".join([
-                "$ErrorActionPreference = 'Stop'",
+                "$ErrorActionPreference = 'SilentlyContinue'",
+                "$me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()",
+                "if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {",
+                "    try { Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',$PSCommandPath } catch {}",
+                "    exit",
+                "}",
                 f"$pidToWait = {current_pid}",
-                f"$sourceDir = {_powershell_literal(str(source_dir))}",
-                f"$appDir = {_powershell_literal(str(app_dir))}",
-                f"$exePath = {_powershell_literal(str(app_dir / exe_name))}",
+                f"$setupPath = {_powershell_literal(str(zip_path))}",
                 f"$tempDir = {_powershell_literal(str(tmp_dir))}",
-                "$logDir = Join-Path (Join-Path $appDir 'data') 'logs'",
-                "$runtimeDir = Join-Path (Join-Path $appDir 'data') 'runtime'",
-                "$errorLog = Join-Path $logDir 'update_error.log'",
-                "$preserveNames = @('data')",
-                "$backupDir = Join-Path $runtimeDir 'update_backup'",
-                "$backupReplaceDir = Join-Path $backupDir 'replace'",
-                "$backupStaleDir = Join-Path $backupDir 'stale'",
-                "Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue",
-                "New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null",
-                "New-Item -ItemType Directory -Path $backupReplaceDir -Force | Out-Null",
-                "New-Item -ItemType Directory -Path $backupStaleDir -Force | Out-Null",
+                f"$configFile = {_powershell_literal(config_file)}",
+                f"$uninstaller = {_powershell_literal(str(uninstaller) if uninstaller else '')}",
+                f"$lumenName = {_powershell_literal(LUMEN_APP_NAME)}",
+                "$lumenDir = Join-Path $env:ProgramFiles $lumenName",
                 "for ($i = 0; $i -lt 120; $i++) {",
                 "    if (-not (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue)) { break }",
                 "    Start-Sleep -Milliseconds 500",
                 "}",
-                "$proc = Get-Process -Id $pidToWait -ErrorAction SilentlyContinue",
-                "if ($proc) { Stop-Process -Id $pidToWait -Force }",
-                "$sourceItems = @(Get-ChildItem -LiteralPath $sourceDir -Force | Where-Object { $preserveNames -notcontains $_.Name })",
-                "$sourceNames = @($sourceItems | ForEach-Object { $_.Name })",
-                "try {",
-                "    Get-ChildItem -LiteralPath $appDir -Force | Where-Object { $preserveNames -notcontains $_.Name } | ForEach-Object {",
-                "        $backupTarget = if ($sourceNames -contains $_.Name) { $backupReplaceDir } else { $backupStaleDir }",
-                "        Move-Item -LiteralPath $_.FullName -Destination $backupTarget -Force",
-                "    }",
-                "    foreach ($item in $sourceItems) {",
-                "        Copy-Item -LiteralPath $item.FullName -Destination $appDir -Recurse -Force",
-                "    }",
-                (
-                    "    $started = Start-Process -FilePath $exePath -ArgumentList '--tray' -WorkingDirectory $appDir -PassThru -ErrorAction Stop"
-                    if self._restart_in_tray
-                    else "    $started = Start-Process -FilePath $exePath -WorkingDirectory $appDir -PassThru -ErrorAction Stop"
-                ),
-                "    Start-Sleep -Seconds 5",
-                "    if ($started.HasExited) {",
-                "        throw ('Updated application exited immediately with code ' + $started.ExitCode)",
-                "    }",
-                "    Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue",
+                "if (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) { Stop-Process -Id $pidToWait -Force -ErrorAction SilentlyContinue }",
+                "Start-Sleep -Milliseconds 800",
+                "# (1) Install Lumen KVN first, into a known folder.",
+                "if (Test-Path -LiteralPath $setupPath) {",
+                "    try { Start-Process -FilePath $setupPath -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',('/DIR=' + $lumenDir) -Wait } catch { try { Start-Process -FilePath $setupPath -Wait } catch {} }",
                 "}",
-                "catch {",
-                "    Get-ChildItem -LiteralPath $appDir -Force -ErrorAction SilentlyContinue | Where-Object { $preserveNames -notcontains $_.Name } | ForEach-Object {",
-                "        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue",
-                "    }",
-                "    Get-ChildItem -LiteralPath $backupReplaceDir -Force -ErrorAction SilentlyContinue | ForEach-Object {",
-                "        Move-Item -LiteralPath $_.FullName -Destination $appDir -Force",
-                "    }",
-                "    Get-ChildItem -LiteralPath $backupStaleDir -Force -ErrorAction SilentlyContinue | ForEach-Object {",
-                "        Move-Item -LiteralPath $_.FullName -Destination $appDir -Force",
-                "    }",
-                (
-                    "    if (Test-Path -LiteralPath $exePath) { Start-Process -FilePath $exePath -ArgumentList '--tray' -WorkingDirectory $appDir -ErrorAction SilentlyContinue | Out-Null }"
-                    if self._restart_in_tray
-                    else "    if (Test-Path -LiteralPath $exePath) { Start-Process -FilePath $exePath -WorkingDirectory $appDir -ErrorAction SilentlyContinue | Out-Null }"
-                ),
-                "    New-Item -ItemType Directory -Path $logDir -Force | Out-Null",
-                "    ($_ | Out-String) | Set-Content -LiteralPath $errorLog -Encoding UTF8",
-                "    Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue",
-                "    throw",
+                "Start-Sleep -Milliseconds 1500",
+                "# (2) Copy the server config straight into Lumen KVN's data folder.",
+                "if ((Test-Path -LiteralPath $lumenDir) -and $configFile.Length -gt 0 -and (Test-Path -LiteralPath $configFile)) {",
+                "    $dataDir = Join-Path $lumenDir 'data'",
+                "    try { New-Item -ItemType Directory -Force -Path $dataDir | Out-Null } catch {}",
+                "    try { Copy-Item -LiteralPath $configFile -Destination (Join-Path $dataDir 'state.enc') -Force } catch {}",
+                "}",
+                "Start-Sleep -Milliseconds 400",
+                "# (3) Uninstall bebra-kvn.",
+                "if ($uninstaller.Length -gt 0 -and (Test-Path -LiteralPath $uninstaller)) {",
+                "    try { Start-Process -FilePath $uninstaller -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait } catch {}",
+                "}",
+                "Start-Sleep -Milliseconds 800",
+                "# (4) Launch Lumen KVN.",
+                "if (Test-Path -LiteralPath $lumenDir) {",
+                "    $exe = Get-ChildItem -Path $lumenDir -Filter *.exe -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike 'unins*' } | Select-Object -First 1",
+                "    if ($exe) { try { Start-Process -FilePath $exe.FullName } catch {} }",
                 "}",
                 "Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue",
                 "",
             ])
             _write_utf8_bom_text(script, script_text)
 
-            # Launch script and exit
+            # Launch the detached handoff script and exit so the uninstaller can
+            # remove bebra-kvn while the Lumen KVN setup takes over.
             subprocess.Popen(
                 [
                     "powershell",
@@ -583,6 +565,7 @@ class UpdateDownloader(QThread):
             )
 
             self.finished_ok.emit()
+            return
 
         except Exception as exc:
             if tmp_dir is not None:

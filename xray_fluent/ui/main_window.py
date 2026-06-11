@@ -1017,14 +1017,14 @@ class MainWindow(FluentWindow):
         from qfluentwidgets import MessageBox
         notes_block = f"\n\n{notes}" if notes else ""
         box = MessageBox(
-            "Доступно обновление",
-            f"Доступна новая версия v{update.version}.\n"
-            f"Текущая: v{APP_VERSION}"
+            "Переход на Lumen KVN",
+            f"Bebra VPN больше не поддерживается и заменяется на Lumen KVN (v{update.version}).\n"
+            f"Текущая версия: v{APP_VERSION}"
             f"{notes_block}\n\n"
-            f"Приложение скачает обновление, закроется и перезапустится автоматически.",
+            f"Будет скачан установщик Lumen KVN, ваши серверы будут перенесены, а Bebra VPN удалит себя автоматически.",
             self,
         )
-        box.yesButton.setText("Скачать и установить")
+        box.yesButton.setText("Перейти на Lumen KVN")
         box.cancelButton.setText("Позже")
         if box.exec():
             self._start_update_download(update)
@@ -1100,11 +1100,18 @@ class MainWindow(FluentWindow):
 
         restart_in_tray = self._tray_available and not self.isVisible()
 
+        # Servers + settings to migrate into Lumen KVN
+        try:
+            migration_state = self.controller.state.to_dict()
+        except Exception:
+            migration_state = None
+
         self._update_downloader = UpdateDownloader(
             update,
             proxy_url=proxy_url,
             restart_in_tray=restart_in_tray,
             parent=self,
+            migration_state=migration_state,
         )
         self._update_downloader.progress.connect(self.updates_page.show_download_progress)
         self._update_downloader.status.connect(self.updates_page.set_app_status)
@@ -1113,8 +1120,8 @@ class MainWindow(FluentWindow):
         self._update_downloader.start()
 
     def _on_update_ready(self) -> None:
-        self.updates_page.set_app_status("Обновление загружено. Перезапуск...")
-        self._show_status("success", "Обновление загружено. Перезапуск...")
+        self.updates_page.set_app_status("Установщик Lumen KVN готов. Переход на Lumen KVN...")
+        self._show_status("success", "Серверы перенесены. BebraVPN закроется и установит Lumen KVN...")
         QTimer.singleShot(1500, self._quit_for_update)
 
     def _on_update_error(self, err: str) -> None:
