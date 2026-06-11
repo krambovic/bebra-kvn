@@ -1,4 +1,4 @@
-name: Build & Release
+﻿name: Build & Release
 
 on:
   push:
@@ -103,11 +103,11 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: "Bebra VPN ${{ env.RELEASE_TAG }}"
           body: |
-            ## What's Changed
+            ## Что изменилось
 
-            - [Feature]: Добавлен отдельный nightly-дизайн на Qt Quick / QML.
-            - [Chore]: Stable и Nightly распространяются параллельно в одном релизе.
-            - [Fix]: Апдейтер выбирает архив строго по своему каналу.
+            - [Fix]: Установщик по умолчанию снова ставит приложение в `Program Files`, а не в `C:\Program`.
+            - [Fix]: Миграционный установщик Bebra VPN -> Lumen KVN также использует `Program Files`.
+            - [Chore]: Версия обновлена до 1.0.3.
           generate_release_notes: false
           make_latest: true
           files: |
