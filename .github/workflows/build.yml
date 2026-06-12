@@ -105,9 +105,8 @@ jobs:
           body: |
             ## Что изменилось
 
-            - [Fix]: Установщик по умолчанию снова ставит приложение в `Program Files`, а не в `C:\Program`.
-            - [Fix]: Миграционный установщик Bebra VPN -> Lumen KVN также использует `Program Files`.
-            - [Chore]: Версия обновлена до 1.0.3.
+            - [Fix]: Исправлен переход Bebra VPN -> Lumen KVN: путь `/DIR` теперь передаётся установщику с кавычками, поэтому Lumen ставится в `Program Files`, а не в `C:\Program`.
+            - [Chore]: Версия обновлена до 1.0.4.
           generate_release_notes: false
           make_latest: true
           files: |
